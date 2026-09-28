@@ -28,6 +28,7 @@ import {
   validateExpenseForm,
 } from "@/lib/expenseValidation";
 import { expenseFormSchema } from "@/lib/validations/expense";
+import { expenseCreationSchema } from "@/lib/validation";
 import { MAX_DECIMAL_PLACES, parseExactAmount } from "@/lib/money";
 import { useWalletDisconnected } from "@/lib/wallet-store";
 import { convertCurrency, currencyRate, rateDeviationPercent, SUPPORTED_FIAT_CURRENCIES, type SupportedFiatCurrency } from "@/lib/currency";
@@ -261,20 +262,30 @@ export function AddExpenseDialog({
       return;
     }
 
+    // Final runtime gate on the exact payload about to be dispatched (#315):
+    // a malformed amount, an invalid asset code, or a split that does not add
+    // up is rejected here — with a descriptive message — before mergepay-api
+    // ever sees the request.
+    const payload = expenseCreationSchema.safeParse({
+      title: title.trim(),
+      description: description.trim() || undefined,
+      amount,
+      assetCode: asset.code,
+      assetIssuer: asset.issuer,
+      splitType,
+      shares: sharesPayload,
+      payerUserId,
+      memo: memo.trim() || undefined,
+      receiptUrl,
+    });
+    if (!payload.success) {
+      toast.error(payload.error.issues[0]?.message ?? "Please fix the errors before submitting");
+      return;
+    }
+
     try {
       setSubmitting(true);
-      await create.mutateAsync({
-        title: title.trim(),
-        description: description.trim() || undefined,
-        amount,
-        assetCode: asset.code,
-        assetIssuer: asset.issuer,
-        splitType,
-        shares: sharesPayload,
-        payerUserId,
-        memo: memo.trim() || undefined,
-        receiptUrl,
-      });
+      await create.mutateAsync(payload.data);
       clearDraft();
       // Success toast is fired by the useCreateExpense hook's onSuccess handler.
       onClose();
