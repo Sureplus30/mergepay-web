@@ -18,6 +18,10 @@ import { useWalletStatus } from "@/hooks/useWalletStatus";
 import { WalletPrerequisiteNotice } from "@/components/wallet/wallet-status";
 import { useConfirmSettlement, useSettlementStatus } from "@/lib/queries";
 import { validateSettlementInput } from "@/lib/paymentValidation";
+import {
+  createSettlementFormSchema,
+  fieldErrorsFrom,
+} from "@/lib/validators";
 import { recoveryActionFor, retryLabelFor } from "@/lib/settlementRetry";
 import { useWalletDisconnected } from "@/lib/wallet-store";
 import type { SettlementStep, SettleTarget } from "@/lib/useSettlementFlow";
@@ -185,7 +189,7 @@ export function SettleDialog({
   const [errorCode, setErrorCode] = useState<WalletErrorCode | null>(null);
   const [attempts, setAttempts] = useState(0);
   const [reconnecting, setReconnecting] = useState(false);
-  const statusQuery = useSettlementStatus(settlementId, step === "submitted");
+  const statusQuery = useSettlementStatus(settlementId, step === "submitted", groupId);
   const transactionInFlight = step === "submitting" || step === "submitted";
   // The settle target lives in props and is never mutated here, so a failed
   // attempt leaves the amount, asset, and recipient intact for the retry.
@@ -255,6 +259,20 @@ export function SettleDialog({
       setStep("failed");
       return;
     }
+    // Runtime gate (#339): the settlement input must satisfy the shared Zod
+    // schema before the hand-rolled validator — same rules, one source.
+    const schemaCheck = createSettlementFormSchema.safeParse({
+      toUserId: target.to.id,
+      amount: target.amount,
+      assetCode: target.assetCode,
+      assetIssuer: target.assetIssuer,
+    });
+    if (!schemaCheck.success) {
+      setError(Object.values(fieldErrorsFrom(schemaCheck))[0] ?? "Invalid payment input");
+      setErrorCode(null);
+      setStep("failed");
+      return;
+    }
     const validation = validateSettlementInput({ amount: target.amount, assetCode: target.assetCode, assetIssuer: target.assetIssuer });
     if (!validation.valid) { setError(validation.error ?? "Invalid payment input"); setErrorCode(null); setStep("failed"); return; }
     // Clear the previous attempt's residue so a retry never shows a stale tx
@@ -279,6 +297,7 @@ export function SettleDialog({
       const { settlement } = await confirm.mutateAsync({
         settlementId: intent.settlement.id,
         data: { signedXdr },
+        optimisticTransfer: intent.settlement,
       });
       setSettlementId(intent.settlement.id);
       setTxHash(settlement.stellarTxHash ?? null);

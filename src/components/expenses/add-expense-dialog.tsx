@@ -16,7 +16,7 @@ import { SETTLEMENT_ASSETS, SETTLEMENT_MEMO_PREFIX } from "@/lib/constants";
 import { AssetSelector } from "@/components/expenses/AssetSelector";
 import { ExpenseSplitPreview } from "@/components/expenses/ExpenseSplitPreview";
 import { SplitCalculator, type SplitCalculatorChange } from "@/components/expenses/SplitCalculator";
-import type { GroupMember, SplitType, ExpenseShareInput } from "@/lib/types";
+import type { CreateExpenseRequest, GroupMember, SplitType, ExpenseShareInput } from "@/lib/types";
 import {
   AMOUNT_DECIMAL_PLACES,
   MAX_TITLE_LENGTH,
@@ -39,6 +39,7 @@ import { useLocalStorageDraft } from "@/lib/useLocalStorageDraft";
 import { parseExpenseDeepLink } from "@/lib/deepLink";
 import { useOfflineStore } from "@/lib/store/offlineStore";
 import { useAssetStore, isActiveAsset, type ActiveAsset } from "@/lib/asset-store";
+import { createIdempotencyKey } from "@/lib/submission";
 
 const SUPPORTED_ASSET_CODES = SETTLEMENT_ASSETS.map((a) => a.code);
 
@@ -79,7 +80,7 @@ export function AddExpenseDialog({
   const [assetKey, setAssetKey] = useState(() => supportedAssetKey(activeAsset));
   const [payerUserId, setPayerUserId] = useState(currentUserId);
   const [splitType, setSplitType] = useState<SplitType>("equal");
-  const [participants, setParticipants] = useState<string[]>(members.map((m) => m.userId));
+  const [participants, setParticipants] = useState<string[]>(() => members.map((m) => m.userId));
   const [custom, setCustom] = useState<Record<string, string>>({});
   const [percent, setPercent] = useState<Record<string, string>>({});
   // Bumped when a draft is restored so the calculator remounts with its values.
@@ -110,6 +111,21 @@ export function AddExpenseDialog({
     }
   }, [draft, isRestored]);
 
+  // The dialog mounts with the page, before the group's members have loaded, so
+  // `participants` starts empty on a cold load and every expense is then
+  // rejected as "select at least one participant". Adopt the roster as soon as
+  // it arrives. Both guards matter: returning the current array keeps a
+  // draft-restored selection from being overwritten, and ignoring an empty
+  // roster keeps this from looping — the group page passes a fresh `?? []`
+  // array on every render while the query is pending, and a fresh array is a
+  // state change.
+  useEffect(() => {
+    if (members.length === 0) return;
+    setParticipants((current) =>
+      current.length === 0 ? members.map((m) => m.userId) : current
+    );
+  }, [members]);
+
   useEffect(() => {
     if (title || amount || description || memo) {
       saveDraft({
@@ -133,9 +149,33 @@ export function AddExpenseDialog({
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [showErrors, setShowErrors] = useState(false);
+
+  // The dialog mounts as soon as the group page opens, which is usually before
+  // the group's members have loaded — so `participants` starts empty and never
+  // picks up the list. Adopt members as they arrive while nothing is selected
+  // yet, and drop anyone who has left the group; a deliberate selection is left
+  // alone. Without this, a cold visit to a group offers no participants and the
+  // expense cannot be created at all.
+  useEffect(() => {
+    const memberIdsNow = members.map((m) => m.userId);
+    setParticipants((current) => {
+      if (current.length === 0) return memberIdsNow;
+      const known = new Set(memberIdsNow);
+      const stillMembers = current.filter((id) => known.has(id));
+      if (stillMembers.length === current.length) return current;
+      return stillMembers.length > 0 ? stillMembers : memberIdsNow;
+    });
+  }, [members]);
+
   const walletDisconnected = useWalletDisconnected();
-  const isOffline = typeof navigator !== "undefined" && !navigator.onLine;
-  const submitBlocked = isOffline || walletDisconnected;
+  // The offline store is the single source of truth for connectivity (the
+  // network listeners in AppShell keep it current), so the form and the sync
+  // runner agree on whether it is safe to post.
+  const isOnline = useOfflineStore((s) => s.isOnline);
+  const isOffline = !isOnline;
+  // Offline no longer blocks recording an expense — it queues the draft. A
+  // connected wallet is still required because the request needs the session.
+  const submitBlocked = walletDisconnected;
 
   const pending = create.isPending || submitting;
 
@@ -298,9 +338,27 @@ export function AddExpenseDialog({
       return;
     }
 
+    // Offline: persist the draft in the queue; the sync runner posts it (with
+    // its idempotency key) the moment the connection returns.
+    if (isOffline) {
+      useOfflineStore.getState().enqueue(groupId, payload.data);
+      clearDraft();
+      reset();
+      toast.success(
+        "Saved offline — this expense will sync when you're back online"
+      );
+      onClose();
+      return;
+    }
+
     try {
       setSubmitting(true);
-      await create.mutateAsync(payload.data);
+      await create.mutateAsync({
+        ...payload.data,
+        // Makes the bounded retries in `useCreateExpense` (and a manual retry
+        // after a timeout) safe: the server deduplicates them into one row.
+        idempotencyKey: createIdempotencyKey(),
+      });
       clearDraft();
       // Success toast is fired by the useCreateExpense hook's onSuccess handler.
       onClose();
@@ -531,8 +589,8 @@ export function AddExpenseDialog({
           <Button type="button" variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button type="submit" loading={pending} disabled={submitBlocked}>
-            Add Expense
+          <Button type="submit" loading={pending} disabled={submitBlocked} data-testid="add-expense-confirm">
+            {isOffline ? "Save offline" : "Add Expense"}
           </Button>
         </div>
       </form>

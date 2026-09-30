@@ -115,6 +115,9 @@ function renderModal(props: Partial<SettlementModalProps> = {}) {
 
 const confirmAndSign = () => fireEvent.click(screen.getByRole("button", { name: /confirm & sign/i }));
 
+// Built once per test on purpose: buildSettlementPaymentXdr() stamps the
+// envelope with Math.floor(Date.now() / 1000), so two builds a second apart are
+// not equal (see the time-bounds guard in __tests__/transactions.test.ts).
 let capturedIntent: ReturnType<typeof intent>;
 
 describe("SettlementModal", () => {
@@ -127,6 +130,7 @@ describe("SettlementModal", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.clearAllMocks();
   });
 
@@ -148,10 +152,53 @@ describe("SettlementModal", () => {
     expect(await screen.findByText("Settled!")).toBeInTheDocument();
     expect(api.createSettlement).toHaveBeenCalledWith("g1", { toUserId: "user-2", amount: "10", assetCode: "XLM", assetIssuer: null });
     expect(signXdr).toHaveBeenCalledWith(capturedIntent.xdr, NETWORK_PASSPHRASE);
-    expect(mutateAsync).toHaveBeenCalledWith({ settlementId: "stl-1", data: { signedXdr: capturedIntent.xdr } });
+    expect(mutateAsync).toHaveBeenCalledWith(expect.objectContaining({
+      settlementId: "stl-1",
+      data: { signedXdr: capturedIntent.xdr },
+      optimisticTransfer: expect.objectContaining({
+        fromUserId: "user-1",
+        toUserId: "user-2",
+        amount: "10.0000000",
+        assetCode: "XLM",
+      }),
+    }));
     expect(screen.getByTestId("memo-badge")).toHaveTextContent("rent-0526");
     expect(screen.getByTestId("memo-badge")).toHaveAttribute("data-severity", "none");
     expect(onSettled).toHaveBeenCalledWith(expect.objectContaining({ status: "confirmed" }));
+  });
+
+  it("signs the envelope captured before the clock moved on", async () => {
+    // The regression this guards: the old assertion rebuilt the envelope with
+    // `xdrWith(MEMO)` at assertion time, so it only matched while both builds
+    // landed in the same wall-clock second. Pin the clock a few seconds past
+    // the capture — a rebuild, whether in the test or in the modal, is now
+    // guaranteed to carry a different time bound and fail here deterministically
+    // instead of flaking in CI. Only `Date` is faked so the real-time sign and
+    // confirm deadlines still expire as the other tests expect.
+    const later = Date.now() + 3000;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(later);
+
+    mutateAsync.mockResolvedValue({ settlement: settlement("submitted") });
+    vi.mocked(api.getSettlement)
+      .mockResolvedValueOnce({ settlement: settlement("submitted") })
+      .mockResolvedValue({ settlement: settlement("confirmed") });
+    renderModal();
+
+    confirmAndSign();
+
+    expect(await screen.findByText("Settled!")).toBeInTheDocument();
+    expect(signXdr).toHaveBeenCalledWith(capturedIntent.xdr, NETWORK_PASSPHRASE);
+    expect(mutateAsync).toHaveBeenCalledWith(expect.objectContaining({
+      settlementId: "stl-1",
+      data: { signedXdr: capturedIntent.xdr },
+      optimisticTransfer: expect.objectContaining({
+        fromUserId: "user-1",
+        toUserId: "user-2",
+        amount: "10.0000000",
+        assetCode: "XLM",
+      }),
+    }));
   });
 
   it("handles the user rejecting the signature", async () => {
