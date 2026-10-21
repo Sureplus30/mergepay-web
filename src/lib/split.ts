@@ -246,6 +246,7 @@ export function splitEqual(
   amount: string,
   participants: string[]
 ): Array<{ userId: string; amount: string }> {
+  if (participants.length === 0) return [];
   const stroops = toStroops(amount);
   const shares = allocateEqualRemainder(stroops, participants.length);
   return participants.map((userId, i) => ({
