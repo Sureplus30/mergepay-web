@@ -151,7 +151,8 @@ describe("Dialog Primitive Accessibility & Focus Trapping", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Visible action" })).toHaveFocus());
     const close = screen.getByRole("button", { name: "Close Visible controls" });
     close.focus();
-    fireEvent.keyDown(close, { key: "Tab" });
+    // Close is the first Tab stop; Shift+Tab wraps to the last visible control.
+    fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
     expect(screen.getByRole("button", { name: "Visible action" })).toHaveFocus();
   });
 
