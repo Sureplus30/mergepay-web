@@ -64,7 +64,7 @@ export function useDialogFocus({
         el.tabIndex !== -1 &&
         !el.matches("[hidden], [inert], [aria-hidden='true']") &&
         !el.closest("[hidden], [inert], [aria-hidden='true']") &&
-        el.getClientRects().length > 0
+        window.getComputedStyle(el).visibility !== "hidden"
     );
   }, []);
 
